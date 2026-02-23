@@ -1,0 +1,776 @@
+#Modul: Analisis Ekspresi Gen CRC
+#Dataset: GSE74602 (Colorectal cancer vs Normal)
+#Platform: Microarray (IlluminaHuman v2)
+#Tujuan: Mengidentifikasi Differentially Expressed Genes (DEG) 
+
+#PART A. PENGANTAR KONSEP 
+
+#Analisis ekspresi gen bertujuan untuk membandingkan tingkat ekspresi gen 
+#antara dua kondisi biologis (misalnya kanker vs normal) 
+#Pada modul ini kita menggunakan pendekatan statistik limma (Linear Models
+#for Microarray Data), yang merupakan standar emas untuk data microarray. 
+
+#PART B. PERSIAPAN LINGKUNGAN KERJA (INSTALL & LOAD PACKAGE) 
+
+#Apa itu package? 
+#Package adalah kumpulan fungsi siap pakai di R
+#Bioinformatika di R sangat bergantung pada package dari CRAN dan Bioconductor 
+
+#1. Install BiocManager (manajer paket Bioconductor) 
+#IF adalah struktur logika : “jika kondisi terpenuhi, lakukan aksi”
+
+if (!require("BiocManager", quietly = TRUE))  {
+  install.packages("BiocManager") 
+}
+
+# 2. Install paket Bioconductor (GEOquery & limma) 
+#GEOquery: mengambil data dari database GEO 
+#limma: analisis statistik ekspresi gen 
+
+BiocManager::install(c("GEOquery", "limma"), ask = FALSE, update = FALSE) 
+
+library(GEOquery)
+library(limma)
+library(dplyr)
+library(ggplot2)
+library(pheatmap)
+library(gplots)
+library(RColorBrewer)
+
+#Install annotation package sesuai platform
+#Untuk platform Illumina ini, paket anotasi yang tepat adalah illuminaHumanv2.db
+if (!requireNamespace("BiocManager", quietly = TRUE)) install.packages("BiocManager")
+if (!requireNamespace("illuminaHumanv2.db", quietly = TRUE)) {
+  BiocManager::install("illuminaHumanv2.db", ask = FALSE)
+}
+library(AnnotationDbi)
+library(illuminaHumanv2.db)
+
+#3. Install paket CRAN untuk visualisasi dan manipulasi data 
+#phetmap: heatmap ekspresi gen 
+#ggplot2: grafik (volcano plot)
+#dplyr: manipulasi tabel data 
+
+install.packages(c("pheatmap", "ggplot2", "dplyr"))
+
+#umap: grafik (plot UMAP) 
+if (!requireNamespace("umap", quietly = TRUE)) {
+  install.packages("umap")
+}
+
+#4. Memanggil library 
+#library() digunakan agar fungsi di dalam package bisa digunakan 
+library(GEOquery)
+library(limma)
+library(pheatmap)
+library(ggplot2)
+library(dplyr)
+library(illuminaHumanv2.db)
+library(AnnotationDbi)
+library(umap)
+
+#PART C. PENGAMBILAN DATA DARI LocaL FILE KARENA DARI GEO TIDAK BERHASIL
+local_file <- "C:/Users/LENOVO/Dropbox/PC/Documents/COURSE BIOINFORMATICS/Week 3/GSE74602_series_matrix.txt.gz"
+gset <- getGEO(filename = local_file)  # otomatis mengenali ExpressionSet
+
+
+#PART D. PRE-PROCESSING DATA EKSPRESI 
+
+# exprs(): mengambil matriks ekspresi gen
+# Baris  = probe/gen
+# Kolom  = sampel
+ex <- exprs(gset)
+
+#Mengapa perlu log2 transformasi?
+#Data microarray mentah memiliki rentang nilai sangat besar.
+#Log2 digunakan untuk:
+#1. Menstabilkan varians
+#2. Mendekati asumsi model linear
+#3. Memudahkan interpretasi log fold change
+
+#quantile(): menghitung nilai kuantil (persentil)
+#as.numeric(): mengubah hasil quantile (yang berupa named vector)
+#menjadi vektor numerik biasa agar mudah dibandingkan
+qx <- as.numeric(quantile(ex, c(0, 0.25, 0.5, 0.75, 0.99, 1), na.rm = TRUE))
+
+#LogTransform adalah variabel logika (TRUE / FALSE)
+#Operator logika:
+#>  : lebih besar dari
+#| | : OR (atau)
+#&& : AND (dan)
+LogTransform <- (qx[5] > 100) || (qx[6] - qx[1] > 50 && qx[2] > 0)
+
+#IF statement:
+#Jika LogTransform = TRUE, maka lakukan log2
+if (LogTransform) {
+  # Nilai <= 0 tidak boleh di-log, maka diubah menjadi NA
+  ex[ex <= 0] <- NA
+  ex <- log2(ex)
+}
+
+
+#PART E. DEFINISI KELOMPOK SAMPEL 
+
+#pData(): metadata sampel
+#source_name_ch1 berisi informasi kondisi biologis sampel
+group_info <- pData(gset)[["source_name_ch1"]]
+
+#make.names(): mengubah teks menjadi format valid untuk R
+groups <- make.names(group_info)
+
+#factor():
+#Mengubah data kategorik menjadi faktor
+#Faktor sangat penting untuk analisis statistik di R
+gset$group <- factor(groups)
+
+#levels(): melihat kategori unik dalam faktor
+nama_grup <- levels(gset$group)
+print(nama_grup)
+
+#PART F. DESIGN MATRIX (KERANGKA STATISTIK) 
+
+#model.matrix():
+#Membuat matriks desain untuk model linear
+#~0 berarti TANPA intercept (best practice limma)
+design <- model.matrix(~0 + gset$group)
+
+#colnames(): memberi nama kolom agar mudah dibaca
+colnames(design) <- levels(gset$group)
+
+#Menentukan perbandingan biologis
+grup_tumor <- nama_grup[1]
+grup_normal <- nama_grup[2]
+
+contrast_formula <- paste(grup_tumor, "-", grup_normal)
+print(paste("Kontras yang dianalisis:", contrast_formula))
+
+#model.matrix():
+#Membuat matriks desain untuk model linear
+#~0 berarti TANPA intercept (best practice limma)
+design <- model.matrix(~0 + gset$group)
+
+#colnames(): memberi nama kolom agar mudah dibaca
+colnames(design) <- levels(gset$group)
+
+#Menentukan perbandingan biologis
+grup_tumor <- nama_grup[1]
+grup_normal <- nama_grup[2]
+
+contrast_formula <- paste(grup_tumor, "-", grup_normal)
+print(paste("Kontras yang dianalisis:", contrast_formula))
+
+#PART G. ANALISIS DIFFERENTIAL EXPRESSION (LIMMA)
+
+#lmFit():
+#Membangun model linear untuk setiap gen
+fit <- lmFit(ex, design)
+
+#makeContrasts(): mendefinisikan perbandingan antar grup
+contrast_matrix <- makeContrasts(contrasts = contrast_formula, levels = design)
+
+#contrasts.fit(): menerapkan kontras ke model
+fit2 <- contrasts.fit(fit, contrast_matrix)
+
+#eBayes():
+#Empirical Bayes untuk menstabilkan estimasi varians
+fit2 <- eBayes(fit2)
+
+#solusi
+# 0) Pastikan jumlah sampel memadai (>=2 per grup)
+table(group)
+
+# 1) Cek design matrix
+dim(design); qr(design)$rank; ncol(design)
+# Rank harus == ncol(design). Kalau tidak, design tidak full-rank.
+
+# 2) Cek kesesuaian jumlah sampel
+ncol(ex_norm); nrow(design)
+
+# 3) Cek residual df setelah lmFit (sebelum eBayes)
+summary(fit$df.residual)     # dari fit <- lmFit(ex_norm, design)
+
+# 4) Cek residual df setelah contrasts.fit
+summary(fit2$df.residual)
+
+# 5) Apakah ada NA/Inf di matriks?
+sum(!is.finite(as.matrix(ex_norm)))
+
+# 6) Apakah banyak gen variansnya 0? (baris konstan)
+row_sd <- apply(ex_norm, 1, sd, na.rm = TRUE)
+table(row_sd == 0 | !is.finite(row_sd))[c(TRUE, FALSE)]
+
+#troubleshoot
+# Cari kolom yang jumlah nilai unik-nya kecil (2–5), kandidat biner
+candidates <- list()
+for (nm in names(pdata)) {
+  vals <- trimws(tolower(as.character(pdata[[nm]])))
+  vals <- vals[!is.na(vals) & vals != ""]
+  u <- unique(vals)
+  if (length(u) >= 2 && length(u) <= 5) {
+    candidates[[nm]] <- sort(u)
+  }
+}
+
+cat("\n===== Kandidat kolom biner/terbatas =====\n")
+if (length(candidates) == 0) {
+  cat("Tidak ditemukan kandidat jelas. Coba periksa kolom 'characteristics_ch1.*' secara manual.\n")
+} else {
+  for (nm in names(candidates)) {
+    cat("\nKolom:", nm, "\n")
+    print(table(trimws(tolower(as.character(pdata[[nm]])))))
+  }
+}
+
+pdata <- pData(gset)
+
+# Pilih kolom yang memuat label
+group_raw <- tolower(trimws(as.character(pdata[["tissue type:ch1"]])))
+
+# Ubah jadi 2 level
+group_raw <- gsub("normal.*", "normal", group_raw)
+group_raw <- gsub("tumor.*",  "tumor",  group_raw)
+
+table(group_raw)   # harus 30 normal, 30 tumor
+
+# Selaraskan urutan group dengan kolom ex_norm
+group_vec <- setNames(group_raw, rownames(pdata))
+group <- group_vec[colnames(ex_norm)]
+
+# Hanya ambil sampel yang memang ada grupnya
+keep_cols <- !is.na(group)
+ex_norm <- ex_norm[, keep_cols, drop = FALSE]
+group   <- factor(group[keep_cols], levels = c("normal", "tumor"))
+
+table(group)  # cek lagi -> 30 normal, 30 tumor
+
+## 0) Ambil ekspresi dan metadata terbaru
+ex <- exprs(gset)
+ex[!is.finite(ex)] <- NA
+
+# (Opsional) deteksi & lakukan log2 jika perlu (jika belum dilakukan sebelumnya)
+qx <- quantile(ex, c(0,.25,.5,.75,.99,1), na.rm = TRUE)
+needs_log2 <- (qx[6] > 100) || ((qx[6] - qx[1]) > 50 && qx[2] > 0) ||
+  (qx[2] > 0 && qx[2] < 1 && qx[4] > 2 && qx[4] < 100)
+if (needs_log2) {
+  ex[ex <= 0] <- NA
+  ex <- log2(ex)
+}
+
+# Normalisasi antar-array (quantile)
+library(limma)
+ex_norm <- normalizeBetweenArrays(ex, method = "quantile")
+
+#Gunakan design tanpa intercept dan kontras eksplisit
+# Design tanpa intercept
+design <- model.matrix(~ 0 + group)
+colnames(design) <- levels(group)  # misal: "normal", "tumor"
+
+# Fit
+fit <- lmFit(ex_norm, design)
+
+# Kontras valid (contoh: tumor - normal)
+contrast.matrix <- makeContrasts(TumorVsNormal = tumor - normal, levels = design)
+fit2 <- contrasts.fit(fit, contrast.matrix)
+
+# Baru eBayes
+fit2 <- eBayes(fit2)
+
+#eBayes():
+#Empirical Bayes untuk menstabilkan estimasi varians
+fit2 <- eBayes(fit2)
+
+#solusi fail bayes
+cat("Dim ex_gene:", paste(dim(ex_gene), collapse=" x "), "\n")
+cat("Dim ex_f   :", paste(dim(ex_f),    collapse=" x "), "\n")
+cat("table(group):\n"); print(table(group))
+
+cat("\nDesign dims / rank:\n")
+print(dim(design)); print(qr(design)$rank); print(colnames(design))
+
+cat("\nResidual df (fit & fit2):\n")
+print(summary(fit$df.residual))
+print(summary(fit2$df.residual))
+
+cat("\nNon-finite di ex_f:", sum(!is.finite(ex_f)), "\n")
+rsd <- apply(ex_f, 1, sd, na.rm = TRUE)
+cat("Baris sd=0:", sum(!is.finite(rsd) | rsd == 0), "\n")
+
+#---#
+#Solusi
+## ===== 0) PERSIAPAN DATA & PAKET =====
+if (!requireNamespace("BiocManager", quietly = TRUE)) install.packages("BiocManager")
+for (pkg in c("limma","AnnotationDbi","illuminaHumanv2.db","dplyr")) {
+  if (!requireNamespace(pkg, quietly = TRUE)) {
+    if (pkg %in% c("limma","AnnotationDbi","illuminaHumanv2.db")) {
+      BiocManager::install(pkg, ask = FALSE)
+    } else {
+      install.packages(pkg)
+    }
+  }
+}
+library(limma)
+library(AnnotationDbi)
+library(illuminaHumanv2.db)
+library(dplyr)
+
+# Pastikan gset ada
+stopifnot(exists("gset"))
+
+# Ekspresi probe-level
+ex <- exprs(gset)
+ex[!is.finite(ex)] <- NA
+
+# Log2 jika perlu (heuristik microarray)
+qx <- quantile(ex, c(0,.25,.5,.75,.99,1), na.rm = TRUE)
+needs_log2 <- (qx[6] > 100) || ((qx[6]-qx[1]) > 50 && qx[2] > 0) ||
+  (qx[2] > 0 && qx[2] < 1 && qx[4] > 2 && qx[4] < 100)
+if (needs_log2) {
+  ex[ex <= 0] <- NA
+  ex <- log2(ex)
+}
+
+# Normalisasi antar-array (quantile) di probe-level
+ex_norm <- normalizeBetweenArrays(ex, method = "quantile")
+
+## ===== 1) GROUP: normal vs tumor (dari 'tissue type:ch1') =====
+pdata <- pData(gset)
+src <- tolower(trimws(as.character(pdata[["tissue type:ch1"]])))
+group_raw <- ifelse(grepl("^normal", src), "normal",
+                    ifelse(grepl("^tumor",  src), "tumor", NA))
+group_vec <- setNames(group_raw, rownames(pdata))
+group <- group_vec[colnames(ex_norm)]
+
+# Subset hanya sampel berlabel valid
+keep_cols <- !is.na(group) & group %in% c("normal","tumor")
+ex_norm <- ex_norm[, keep_cols, drop = FALSE]
+group   <- factor(group[keep_cols], levels = c("normal","tumor"))
+
+cat("Sampel per grup:\n"); print(table(group))
+stopifnot(ncol(ex_norm) == length(group))
+
+## ===== 2) ANOTASI ILMN -> SYMBOL (Illumina GPL6104) =====
+probe_ids <- rownames(ex_norm)
+kt <- if ("PROBEID" %in% keytypes(illuminaHumanv2.db)) "PROBEID" else "ILMN"
+
+gene_annotation <- AnnotationDbi::select(
+  illuminaHumanv2.db,
+  keys    = unique(probe_ids),
+  columns = c("SYMBOL","GENENAME"),
+  keytype = kt
+)
+
+id_col <- if ("PROBEID" %in% names(gene_annotation)) "PROBEID" else "ILMN"
+colnames(gene_annotation)[colnames(gene_annotation) == id_col] <- "ProbeID"
+
+annot_1to1 <- gene_annotation %>%
+  mutate(SYMBOL = ifelse(SYMBOL == "" | is.na(SYMBOL), NA, SYMBOL)) %>%
+  arrange(ProbeID, is.na(SYMBOL)) %>%
+  distinct(ProbeID, .keep_all = TRUE) %>%
+  filter(!is.na(SYMBOL) & SYMBOL != "") %>%
+  select(ProbeID, SYMBOL)
+#fail
+
+# Pastikan dplyr diload (boleh setelah AnnotationDbi pun aman selama kita pakai namespace)
+library(dplyr)
+
+annot_1to1 <- gene_annotation %>%
+  dplyr::mutate(SYMBOL = ifelse(SYMBOL == "" | is.na(SYMBOL), NA, SYMBOL)) %>%
+  dplyr::arrange(ProbeID, is.na(SYMBOL)) %>%
+  dplyr::distinct(ProbeID, .keep_all = TRUE) %>%
+  dplyr::filter(!is.na(SYMBOL) & SYMBOL != "") %>%
+  dplyr::select(ProbeID, SYMBOL)
+
+head(annot_1to1)
+
+
+## ===== 3) COLLAPSE KE GENE-LEVEL (mean per gene) =====
+common_probes <- intersect(rownames(ex_norm), annot_1to1$ProbeID)
+ex_sub <- ex_norm[common_probes, , drop = FALSE]
+symbols <- annot_1to1$SYMBOL[match(rownames(ex_sub), annot_1to1$ProbeID)]
+
+# Rata-rata per gene symbol
+ex_gene <- rowsum(ex_sub, group = symbols, na.rm = TRUE) / as.numeric(table(symbols))
+
+# Rapikan numeric & NA
+ex_gene <- as.matrix(ex_gene)
+mode(ex_gene) <- "numeric"
+ex_gene[!is.finite(ex_gene)] <- NA
+
+# Selaraskan ulang group ke kolom ex_gene (harusnya sama, tapi kita pastikan)
+group <- factor(group[ colnames(ex_gene) ], levels = c("normal","tumor"))
+stopifnot(ncol(ex_gene) == length(group))
+
+cat("Dim ex_gene:", paste(dim(ex_gene), collapse=" x "), "\n")
+
+## ===== 4) FILTER GENE (hindari sd=0 & all-NA) =====
+ex_f <- ex_gene
+ex_f[!is.finite(ex_f)] <- NA
+
+keep_nonallNA <- rowSums(is.na(ex_f)) < ncol(ex_f)
+row_sd <- apply(ex_f, 1, sd, na.rm = TRUE)
+keep_sd <- is.finite(row_sd) & row_sd > 0
+
+# (Opsional) filter ekspresi ringan
+keep_expr <- rowMeans(ex_f > 4, na.rm = TRUE) >= 0.2
+
+keep <- keep_nonallNA & keep_sd & keep_expr
+if (sum(keep) < 1000) keep <- keep_nonallNA & keep_sd  # longgarkan jika terlalu ketat
+ex_f <- ex_f[keep, , drop = FALSE]
+
+cat("Dim ex_f (setelah filter):", paste(dim(ex_f), collapse=" x "), "\n")
+
+## ===== 5) DESIGN TANPA INTERCEPT =====
+design <- model.matrix(~ 0 + group)
+colnames(design) <- levels(group)  # "normal","tumor"
+stopifnot(nrow(design) == ncol(ex_f))
+cat("Design dims:", paste(dim(design), collapse=" x "), 
+    " | rank:", qr(design)$rank, "\n")
+
+## ===== 6) LIMMA: lmFit -> contrasts.fit -> eBayes =====
+fit <- lmFit(ex_f, design)
+cat("Residual df setelah lmFit (ringkas):\n"); print(summary(fit$df.residual))
+
+# Kontras: tumor - normal
+stopifnot(all(c("normal","tumor") %in% colnames(design)))
+contrast.matrix <- makeContrasts(TumorVsNormal = tumor - normal, levels = design)
+
+fit2 <- contrasts.fit(fit, contrast.matrix)
+cat("Residual df setelah contrasts.fit (should be sama dgn lmFit):\n")
+print(summary(fit2$df.residual))
+
+# eBayes (sekarang harus OK)
+fit2 <- eBayes(fit2)
+
+res_gene <- topTable(fit2, coef = "TumorVsNormal", number = Inf, adjust.method = "BH")
+head(res_gene)
+summary(decideTests(fit2))
+
+# Verifikasi jumlah sampel
+table(group)                       # target 30/30
+stopifnot(ncol(ex_gene) == length(group))
+
+#topTable():
+#Mengambil hasil akhir DEG
+#adjust = "fdr" -> koreksi multiple testing
+#p.value = 0.01  -> gen sangat signifikan
+topTableResults <- topTable(
+  fit2,
+  adjust = "fdr",
+  sort.by = "B",
+  number = Inf,
+  p.value = 0.01
+)
+
+head(topTableResults)
+
+#PART H. ANOTASI NAMA GEN 
+
+#Mengambil ID probe dari hasil DEG
+probe_ids <- rownames(topTableResults)
+
+#Mapping probe -> gene symbol & gene name
+gene_annotation <- AnnotationDbi::select(
+  illuminaHumanv2.db,
+  keys = probe_ids,
+  columns = c("SYMBOL", "GENENAME"),
+  keytype = "ILMNID"
+)
+#error
+
+#perbaikan
+library(AnnotationDbi)
+library(illuminaHumanv2.db)
+library(dplyr)
+
+# Pilih keytype yang paling cocok secara otomatis
+pick_keytype_for_illumina <- function(ids, db = illuminaHumanv2.db) {
+  kts <- keytypes(db)
+  cand <- intersect(c("PROBEID", "ILMN"), kts)
+  best <- NA; best_n <- -1
+  for (kt in cand) {
+    valid <- tryCatch(keys(db, keytype = kt), error = function(e) character(0))
+    n <- sum(ids %in% valid)
+    if (n > best_n) { best <- kt; best_n <- n }
+  }
+  list(keytype = best, n_match = best_n)
+}
+
+info <- pick_keytype_for_illumina(probe_ids)
+info
+# Jika info$n_match == 0 -> kemungkinan besar probe_ids bukan ILMN IDs (lihat Solusi B/C)
+
+if (!is.na(info$keytype) && info$n_match > 0) {
+  gene_annotation <- AnnotationDbi::select(
+    illuminaHumanv2.db,
+    keys    = unique(probe_ids),
+    columns = c("SYMBOL", "GENENAME"),
+    keytype = info$keytype
+  )
+  
+  # Rapikan ID kolom
+  id_col <- if ("PROBEID" %in% names(gene_annotation)) "PROBEID" else "ILMN"
+  colnames(gene_annotation)[colnames(gene_annotation) == id_col] <- "ProbeID"
+  
+  # Ambil satu SYMBOL per probe (praktis)
+  annot_1to1 <- gene_annotation %>%
+    dplyr::mutate(SYMBOL = ifelse(SYMBOL == "" | is.na(SYMBOL), NA, SYMBOL)) %>%
+    dplyr::arrange(ProbeID, is.na(SYMBOL)) %>%
+    dplyr::distinct(ProbeID, .keep_all = TRUE)
+  
+  head(annot_1to1)
+} else {
+  message("Tidak ada kecocokan keytype untuk probe_ids. Kemungkinan rownames adalah gene SYMBOL (lihat Solusi B).")
+}
+
+#solusi B
+if (!requireNamespace("org.Hs.eg.db", quietly = TRUE)) {
+  BiocManager::install("org.Hs.eg.db", ask = FALSE)
+}
+library(org.Hs.eg.db)
+library(AnnotationDbi)
+# Asumsikan topTableResults sudah gene-level (rownames = SYMBOL)
+symbols <- rownames(topTableResults)
+
+gene_name_map <- AnnotationDbi::mapIds(
+  org.Hs.eg.db,
+  keys     = symbols,
+  keytype  = "SYMBOL",
+  column   = "GENENAME",
+  multiVals = "first"
+)
+
+deg_annot <- cbind(
+  SYMBOL   = symbols,
+  GENENAME = unname(gene_name_map),
+  topTableResults
+)
+head(deg_annot[, c("SYMBOL","GENENAME","logFC","P.Value","adj.P.Val")])
+
+
+#Gabungkan dengan hasil limma
+topTableResults$ProbeID <- rownames(topTableResults)
+
+topTableResults <- merge(
+  topTableResults,
+  gene_annotation,
+  by = "ProbeID",
+  all.x = TRUE
+)
+
+#Cek hasil anotasi
+head(topTableResults[, c("ProbeID", "SYMBOL", "GENENAME")])
+
+#PART I.1 BOXPLOT DISTRIBUSI NILAI EKSPRESI 
+
+#Boxplot digunakan untuk:
+#- Mengecek distribusi nilai ekspresi antar sampel
+#- Melihat apakah ada batch effect
+#- Mengevaluasi apakah normalisasi/log-transform sudah wajar
+
+#Set warna berdasarkan grup
+
+group_colors <- as.numeric(gset$group)
+
+boxplot(
+  ex,
+  col = group_colors,
+  las = 2,
+  outline = FALSE,
+  main = "Boxplot Distribusi Nilai Ekspresi per Sampel",
+  ylab = "Expression Value (log2)"
+)
+
+legend(
+  "topright",
+  legend = levels(gset$group),
+  fill = unique(group_colors),
+  cex = 0.2
+)
+
+# Misal: ex_gene (genes x samples), kita boxplot per sampel
+mat <- ex_gene  # atau ex_norm / ex, sesuai matriks yang ingin diplot
+
+# 1) PRATINJAU DI PANE (mungkin masih sempit, tapi lebih baik):
+par(mar = c(12, 4, 2, 1))   # tambah margin bawah (12)
+boxplot(mat, outline = FALSE, las = 2, cex.axis = 0.6,
+        main = "Distribusi Ekspresi per Sampel (Gene-level)",
+        ylab = "Ekspresi (log2)")
+
+# 2) SIMPAN KE FILE PNG LEBAR (direkomendasikan agar tidak terpotong):
+png("boxplot_gene_level_full.png",
+    width = 3000, height = 1200, res = 200)  # lebar besar
+par(mar = c(18, 5, 3, 2))                    # margin bawah besar untuk label
+boxplot(mat, outline = FALSE, las = 2, cex.axis = 0.7,
+        main = "Distribusi Ekspresi per Sampel (Gene-level)",
+        ylab = "Ekspresi (log2)")
+dev.off()
+
+# 3) ALTERNATIF PDF (vector, tidak akan blur, sangat cocok untuk banyak sampel):
+pdf("boxplot_gene_level_full.pdf", width = 18, height = 7)  # ukuran dalam inci
+par(mar = c(18, 5, 3, 2))
+boxplot(mat, outline = FALSE, las = 2, cex.axis = 0.7,
+        main = "Distribusi Ekspresi per Sampel (Gene-level)",
+        ylab = "Ekspresi (log2)")
+dev.off()
+
+#PART I.2 DISTRIBUSI NILAI EKSPRESI (DENSITY PLOT) 
+
+#Density plot menunjukkan sebaran global nilai ekspresi gen
+#Digunakan untuk:
+#- Mengecek efek log-transform
+#- Membandingkan distribusi antar grup
+
+#Gabungkan ekspresi & grup ke data frame
+expr_long <- data.frame(
+  Expression = as.vector(ex),
+  Group = rep(gset$group, each = nrow(ex))
+)
+
+ggplot(expr_long, aes(x = Expression, color = Group)) +
+  geom_density(linewidth = 1) +
+  theme_minimal() +
+  labs(
+    title = "Distribusi Nilai Ekspresi Gen",
+    x = "Expression Value (log2)",
+    y = "Density"
+  )
+
+
+#PART I.3 UMAP (VISUALISASI DIMENSI RENDAH)
+
+#UMAP digunakan untuk:
+#- Mereduksi ribuan gen menjadi 2 dimensi
+#- Melihat pemisahan sampel secara global
+#- Alternatif PCA (lebih sensitif ke struktur lokal)
+
+#Transpose matriks ekspresi:
+#UMAP bekerja pada OBSERVATION = sampel
+library(umap)
+umap_input <- t(ex)
+
+#Jalankan UMAP
+umap_result <- umap(umap_input)
+
+#Simpan hasil ke data frame
+umap_df <- data.frame(
+  UMAP1 = umap_result$layout[, 1],
+  UMAP2 = umap_result$layout[, 2],
+  Group = gset$group
+)
+
+#Plot UMAP
+ggplot(umap_df, aes(x = UMAP1, y = UMAP2, color = Group)) +
+  geom_point(size = 2, alpha = 0.8) +
+  theme_minimal() +
+  labs(
+    title = "UMAP Plot Sampel Berdasarkan Ekspresi Gen",
+    x = "UMAP 1",
+    y = "UMAP 2"
+  )
+
+
+#PART J.1 VISUALISASI VOLCANO PLOT 
+
+#Volcano plot menggabungkan:
+#- Log fold change (efek biologis)
+#- Signifikansi statistik
+
+volcano_data <- data.frame(
+  logFC = topTableResults$logFC,
+  adj.P.Val = topTableResults$adj.P.Val,
+  Gene = topTableResults$SYMBOL
+)
+
+#Klasifikasi status gen
+volcano_data$status <- "NO"
+volcano_data$status[volcano_data$logFC > 1 & volcano_data$adj.P.Val < 0.01] <- "UP"
+volcano_data$status[volcano_data$logFC < -1 & volcano_data$adj.P.Val < 0.01] <- "DOWN"
+
+#Visualisasi
+ggplot(volcano_data, aes(x = logFC, y = -log10(adj.P.Val), color = status)) +
+  geom_point(alpha = 0.6) +
+  scale_color_manual(values = c("DOWN" = "blue", "NO" = "grey", "UP" = "red")) +
+  geom_vline(xintercept = c(-1, 1), linetype = "dashed") +
+  geom_hline(yintercept = -log10(0.01), linetype = "dashed") +
+  theme_minimal() +
+  ggtitle("Volcano Plot DEG Tumur Kolorektal")
+
+
+#PART J.2 VISUALISASI HEATMAP 
+
+#Heatmap digunakan untuk melihat pola ekspresi gen
+#antar sampel berdasarkan gen-gen paling signifikan
+
+#Pilih 50 gen paling signifikan berdasarkan adj.P.Val
+topTableResults <- topTableResults[
+  order(topTableResults$adj.P.Val),
+]
+
+top50 <- head(topTableResults, 50)
+
+#Ambil matriks ekspresi untuk gen terpilih
+mat_heatmap <- ex[top50$ProbeID, ]
+#fail
+
+#solusi
+# Pastikan kolom ID di top50 benar
+id_col <- if ("ProbeID" %in% names(top50)) "ProbeID" else
+  if ("PROBEID" %in% names(top50)) "PROBEID" else
+    if ("ID" %in% names(top50))      "ID"      else NA
+stopifnot(!is.na(id_col))
+
+# Ambil ID yang benar-benar tersedia di ex
+available <- intersect(top50[[id_col]], rownames(ex))
+if (length(available) < 2) {
+  stop("Top IDs tidak cocok dengan rownames(ex). Pastikan top50 berasal dari hasil probe-level.")
+}
+
+mat_heatmap <- ex[available, , drop = FALSE]
+
+#Gunakan Gene Symbol (fallback ke Probe ID)
+gene_label <- ifelse(
+  is.na(top50$SYMBOL) | top50$SYMBOL == "",
+  top50$PROBEID,      # jika SYMBOL kosong → probe ID
+  top50$SYMBOL        # jika ada → gene symbol
+)
+
+rownames(mat_heatmap) <- gene_label
+
+#Pembersihan data (WAJIB agar tidak error hclust)
+#Hapus baris dengan NA
+mat_heatmap <- mat_heatmap[
+  rowSums(is.na(mat_heatmap)) == 0,
+]
+
+#Hapus gen dengan varians nol
+gene_variance <- apply(mat_heatmap, 1, var)
+mat_heatmap <- mat_heatmap[gene_variance > 0, ]
+
+#Anotasi kolom (kelompok sampel)
+annotation_col <- data.frame(
+  Group = gset$group
+)
+
+rownames(annotation_col) <- colnames(mat_heatmap)
+
+#Visualisasi heatmap 
+pheatmap(
+  mat_heatmap,
+  scale = "row",                 # Z-score per gen
+  annotation_col = annotation_col,
+  show_colnames = FALSE,         # nama sampel dimatikan
+  show_rownames = TRUE,
+  fontsize_row = 7,
+  clustering_distance_rows = "euclidean",
+  clustering_distance_cols = "euclidean",
+  clustering_method = "complete",
+  main = "Top 50 Differentially Expressed Genes"
+)
+
+
+#PART K. MENYIMPAN HASIL 
+
+# write.csv(): menyimpan hasil analisis ke file CSV
+write.csv(topTableResults, "Hasil_GSE74602_DEG.csv")
+
+message("Analisis selesai. File hasil telah disimpan.")
